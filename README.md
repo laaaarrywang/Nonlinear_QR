@@ -2,4 +2,6 @@
 
 Nonlinear Formulation and Sparse Learning of Joint Quantile Functions Estimation
 
-Edited code of 
+Edited `qrjoint` CRAN project for
+(i) sparse learning
+(ii) implementation of kernel machines
