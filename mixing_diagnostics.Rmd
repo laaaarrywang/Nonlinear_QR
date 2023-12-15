@@ -1,0 +1,37 @@
+---
+title: "mixing_diagnostics"
+author: "Linxuan Wang"
+date: "2023-09-18"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(coda)
+```
+
+
+##### Let's look at effeective sample size
+```{r}
+# traceplots
+result.coda <- mcmc(results2[,68:73], start = 1) # no burn-in steps options(digits=3) 
+
+plot(result.coda)
+
+pdf(file = "acf.pdf", width = 8, height = 6)
+autocorr.plot(result.coda,lag.max=100)
+dev.off()
+effectiveSize(result.coda)
+```
+
+
+
+```{r}
+# traceplots for the original function on the dataset
+result2.coda <- mcmc(results2, start = 1) # no burn-in steps options(digits=3) 
+plot(result2.coda)
+autocorr.plot(result2.coda,lag.max=100)
+effectiveSize(result2.coda)
+```
+
+

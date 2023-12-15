@@ -1,0 +1,238 @@
+---
+title: "random_trials"
+author: "Linxuan Wang"
+date: "2023-06-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+t <- match("logistic", c("t", "logistic", "unif"))
+q0 <- function(u, nu = Inf) return(1/(dt(qt(qrjoint:::unitFn(u), 
+            df = nu), df = nu) * qt(0.9, df = nu)))
+qlogis(0.999999999999999999)
+qlogis(qrjoint:::unitFn(1))
+```
+
+```{r}
+match.call(q0(0.5,nu=1))
+mf = match.call(get, call("get", "abc", i = FALSE, p = 3))
+names(mf)
+mf = match.call(qrjoint)
+names(mf)
+abc = list('dcd'=1,"rcp" = 2)
+get("abc")
+get("abc", pos = 1, inherits = FALSE)
+
+my_function <- function(a, b=1, ...) {
+  call_expression <- match.call(expand.dots = FALSE)
+  return(call_expression)
+}
+
+mf = my_function(a=1,b=2,c = 30, d = 40)
+names(mf)
+m=match(c("b","a"),names(mt))
+mf = mf[c(1L, m)]
+mf$drop.unused.levels <- TRUE
+mf[[1L]] <- quote(stats::model.frame)
+mf <- eval(mf, parent.frame())
+attr(mf,"b")
+
+
+```
+```{r}
+data(plasma)
+plasma$Sex <- as.factor(plasma$Sex)
+plasma$SmokStat <- as.factor(plasma$SmokStat)
+plasma$VitUse <- 3 - plasma$VitUse
+plasma$VitUse <- as.factor(plasma$VitUse)
+# Model fitting with 40 posterior samples from 80 iterations (thin = 2) is for
+# illustration only. For practical model fitting, increase iterations,
+# e.g. nsamp = 500, thin = 20
+fit.qrj <- qrjoint(BetaPlasma ~ Age + Sex + SmokStat + Quetelet + VitUse + Calories +
+Fat + Fiber + Alcohol + Cholesterol + BetaDiet, plasma, nsamp = 40, thin = 2)
+
+mf = qrjoint(BetaPlasma ~ Age + Sex + SmokStat + Quetelet + VitUse + Calories +
+Fat + Fiber + Alcohol + Cholesterol + BetaDiet, plasma, nsamp = 40, thin = 2)
+
+# below shows the functionality of match.call in the original code
+mf = match.call(qrjoint, call("qrjoint", BetaPlasma ~ Age + Sex + SmokStat + Quetelet + VitUse + Calories +
+Fat + Fiber + Alcohol + Cholesterol + BetaDiet, plasma, nsamp = 40, thin = 2), expand.dots = F)
+names(mf)
+m <- match(c("formula", "data", "cens", "wt"), names(mf), 0L)
+m
+mf <- mf[c(1L, m)]
+mf$drop.unused.levels <- TRUE
+mf[[1L]] <- quote(stats::model.frame)
+mf <- eval(mf, parent.frame())
+mt <- attr(mf, "terms")
+mt
+```
+```{r, lamFn, klGP, proxFn}
+# lamFn translates the value of rho_0.1(lambda) to lambda. remember that we replace the prior of lambda with a dense, discrete
+# approximation covering the range (0.2,0.95)
+lamFn = function (prox) {return(sqrt(-100 * log(prox)))} 
+
+# function below calculates Kullback-Leibler divergence between two Gaussian process priors
+klGP = function (lam1, lam2, nknots = 11) {
+    tau <- seq(0, 1, len = nknots)
+    dd <- outer(tau, tau, "-")^2
+    K1 <- exp(-lam1^2 * dd) # covariance matrix for the first gaussian process prior
+    diag(K1) <- 1 + 1e-10 # numerical stability
+    R1 <- chol(K1) # the upper triangular matrix is stored
+    log.detR1 <- sum(log(diag(R1)))
+    K2 <- exp(-lam2^2 * dd)
+    diag(K2) <- 1 + 1e-10
+    R2 <- chol(K2)
+    log.detR2 <- sum(log(diag(R2)))
+    return(log.detR2 - log.detR1 - 0.5 * (nknots - sum(diag(solve(K2, 
+        K1))))) # the kl-divergence between two multivariate gaussian distribution
+}
+
+proxFn = function (prox.Max, prox.Min, kl.step = 1) {
+    prox.grid <- prox.Max
+    j <- 1
+    while (prox.grid[j] > prox.Min) {
+        prox1 <- prox.grid[j]
+        prox2 <- prox.Min
+        kk <- klGP(lamFn(prox1), lamFn(prox2))
+        while (kk > kl.step) {
+            # after determining the value of lambda_{g-1}, decrease prox2 until d(lambda_{g-1},lambda_g) <= 1
+            prox2 <- (prox1 + prox2)/2 
+            kk <- klGP(lamFn(prox1), lamFn(prox2))
+        }
+        j <- j + 1
+        prox.grid <- c(prox.grid, prox2)
+    }
+    return(prox.grid)
+}
+
+proxFn(0.95,0.2,0.5)
+```
+
+```{r,ppFn0,ppFn}
+ppFn0 = function (w.knot, gridmats, L, nknots, ngrid) 
+{
+    w.grid <- matrix(NA, L, ngrid)
+    lpost.grid <- rep(NA, ngrid)
+    for (i in 1:ngrid) { # for each lambda
+        A <- matrix(gridmats[1:(L * nknots), i], nrow = nknots)
+        R <- matrix(gridmats[L * nknots + 1:(nknots * nknots), 
+            i], nrow = nknots) # upper triangular matrix from cholesky decomp
+        r <- qrjoint:::sum.sq(backsolve(R, w.knot, transpose = TRUE)) # backsolve: solve t(R)%*%y = w.knot for y, the original standard multivariate normal vector
+        w.grid[, i] <- colSums(A * w.knot) # A_g %*% W_j
+        lpost.grid[i] <- -(0.5 * nknots + 0.1) * log1p(0.5 * 
+            r/0.1) - gridmats[nknots * (L + nknots) + 1, i] + 
+            gridmats[nknots * (L + nknots) + 2, i] # log of multi
+    }
+    lpost.sum <- logsum(lpost.grid) # logarithm of sum of all elements in lpost.grid (log(sum_g p_g*\pi_g))
+    post.grid <- exp(lpost.grid - lpost.sum) # normalize marginal prior density of W_j*
+    w <- c(w.grid %*% post.grid) # \tilde{W}_j
+    return(list(w = w, lpost.sum = lpost.sum))
+}
+
+ppFn = function (w.knot, gridmats, L, nknots, ngrid, a.kap) 
+{
+    w.grid <- matrix(NA, L, ngrid)
+    lpost.grid <- rep(NA, ngrid)
+    for (i in 1:ngrid) {
+        A <- matrix(gridmats[1:(L * nknots), i], nrow = nknots)
+        R <- matrix(gridmats[L * nknots + 1:(nknots * nknots), 
+            i], nrow = nknots)
+        r <- sum.sq(backsolve(R, w.knot, transpose = TRUE))
+        w.grid[, i] <- colSums(A * w.knot)
+        lpost.grid[i] <- (logsum(-(nknots/2 + a.kap[1, ]) * log1p(0.5 * 
+            r/a.kap[2, ]) + a.kap[3, ] + lgamma(a.kap[1, ] + 
+            nknots/2) - lgamma(a.kap[1, ]) - 0.5 * nknots * log(a.kap[2, 
+            ])) - gridmats[nknots * (L + nknots) + 1, i] + gridmats[nknots * 
+            (L + nknots) + 2, i])
+    }
+    lpost.sum <- logsum(lpost.grid)
+    post.grid <- exp(lpost.grid - lpost.sum)
+    w <- c(w.grid %*% post.grid)
+    return(list(w = w, lpost.sum = lpost.sum))
+}
+```
+
+The main functionality of `ppFn0` is marginalizing out $\lambda_j$, since $\kappa_j$ is fixed at 0.1 so we don't need to marginalize it. The theoretical part of which is demonstrated on page 1112 left. Some notable variables are: $r$, which calculates $W_{j*}^T C_{**}^{-1}(\lambda_g)W_{j*}$; lpost.grid, which calculates $\log \left(\left \{ 1+\frac{W_{j*}^T C_{**}^{-1}(\lambda_g)W_{j*}}{2b_\kappa} \right\}^{-(a_\kappa+m/2)} |C_{**}|^{-1/2} \pi_{\lambda}^*(\lambda_g)\right)$.
+
+```{r, estFn}
+estFn <- function (par, x, y, gridmats, L, mid, nknots, ngrid, a.kap, 
+    a.sig, tau.g, reg.ix, reduce = TRUE, x.ce = 0, x.sc = 1, 
+    base.bundle) 
+{
+    n <- length(y) # number of observations
+    p <- ncol(x) # number of explanatory variables
+    wKnot <- matrix(par[1:(nknots * (p + 1))], nrow = nknots) # initial value of w_j at m=6 supplementary knots.
+    delta <- par[(nknots + 1)*(p+1) + 2 + 1:p]
+    w0PP <- qrjoint:::ppFn0(wKnot[, 1], gridmats, L, nknots, ngrid) # wKnot[,1] is the initial value for w_0 at different knots
+    w0 <- w0PP$w # \tilde{w_0}(\tau), L-dimensional
+    wPP <- apply(wKnot[, -1, drop = FALSE], 2, qrjoint:::ppFn, gridmats = gridmats, 
+        L = L, nknots = nknots, ngrid = ngrid, a.kap = a.kap) # \tilde{w_j}(\tau), L-dimensional
+    wMat <- matrix(sapply(wPP, qrjoint:::extract, vn = "w"), ncol = p) # 121*13
+    indi <- sweep(abs(wMat), 2, delta, FUN=">")
+    wMat <- wMat%*%indi
+    zeta0.dot <- exp(qrjoint:::shrinkFn(p) * (w0 - max(w0))) # proportional to derivative of zeta. One question: why delete max(w0)?
+    zeta0 <- qrjoint:::trape(zeta0.dot[-c(1, L)], tau.g[-c(1, L)], L - 
+        2) # throw away the first and last grid (0 and 1), 
+    zeta0.tot <- zeta0[L - 2]
+    zeta0 <- c(0, tau.g[2] + (tau.g[L - 1] - tau.g[2]) * zeta0/zeta0.tot, 
+        1) # zeta0.tot is the total area between tau.g[2] and tau.g[L-1]
+    zeta0.dot <- (tau.g[L - 1] - tau.g[2]) * zeta0.dot/zeta0.tot
+    zeta0.dot[c(1, L)] <- 0
+    zeta0.ticks <- pmin(L - 1, pmax(1, sapply(zeta0, function(u) sum(tau.g <= 
+        u)))) # for interpolation
+    zeta0.dists <- (zeta0 - tau.g[zeta0.ticks])/(tau.g[zeta0.ticks + 
+        1] - tau.g[zeta0.ticks]) # 分子是zeta0中的点与紧邻的上一个tau.g中点的距离，分母是所在线段的长度
+    vMat <- apply(wMat, 2, qrjoint:::transform.grid, ticks = zeta0.ticks, 
+        dists = zeta0.dists) # 计算w(zeta(tau))
+    reach <- nknots * (p + 1)
+    gam0 <- par[reach + 1]
+    reach <- reach + 1
+    gam <- par[reach + 1:p]
+    reach <- reach + p
+    sigma <- qrjoint:::sigFn(par[reach + 1], a.sig)
+    reach <- reach + 1
+    nu <- qrjoint:::nuFn(par[reach + 1])
+    b0dot <- sigma * base.bundle$q0(zeta0, nu) * zeta0.dot
+    beta0.hat <- rep(NA, L)
+    beta0.hat[mid:L] <- gam0 + qrjoint:::trape(b0dot[mid:L], tau.g[mid:L], 
+        L - mid + 1)
+    beta0.hat[mid:1] <- gam0 + qrjoint:::trape(b0dot[mid:1], tau.g[mid:1], 
+        mid)
+    vNorm <- sqrt(rowSums(vMat^2))
+    a <- tcrossprod(vMat, x)
+    aX <- apply(-a, 1, max)/vNorm
+    aX[is.nan(aX)] <- Inf
+    aTilde <- vMat/(aX * sqrt(1 + vNorm^2))
+    ab0 <- b0dot * aTilde
+    beta.hat <- kronecker(rep(1, L), t(gam))
+    beta.hat[mid:L, ] <- beta.hat[mid:L, ] + apply(ab0[mid:L, 
+        , drop = FALSE], 2, trape, h = tau.g[mid:L], len = L - 
+        mid + 1) # why mid?
+    beta.hat[mid:1, ] <- beta.hat[mid:1, ] + apply(ab0[mid:1, 
+        , drop = FALSE], 2, trape, h = tau.g[mid:1], len = mid) # why mid?
+    beta.hat <- beta.hat/x.sc
+    beta0.hat <- beta0.hat - rowSums(beta.hat * x.ce)
+    betas <- cbind(beta0.hat, beta.hat)
+    if (reduce) 
+        betas <- betas[reg.ix, , drop = FALSE]
+    return(betas)
+}
+```
+
+```{r}
+# Example data
+M <- matrix(c(1, 2, 3, 4, 5, 6), nrow=3)
+vec <- c(3, 4)
+
+# Compare absolute value of each row of M with vec
+result <- sweep(abs(M), 2, vec, FUN="<")
+
+print(result)
+
+```
+

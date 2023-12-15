@@ -1,0 +1,18 @@
+---
+title: "qrjointL"
+author: "Linxuan Wang"
+date: "2023-10-31"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+data(plasma)
+oo = qrjointL(BetaPlasma ~ Age + Sex + SmokStat + Quetelet + VitUse + Calories + 
+        Fat + Fiber + Alcohol + Cholesterol + BetaDiet, plasma, nsamp = 100, thin = 10)
+```
+

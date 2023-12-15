@@ -1,0 +1,15 @@
+---
+title: "variables"
+author: "Linxuan Wang"
+date: "2023-07-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## gridmats
+
+This variable collects $A_g$ on page 1112, cholesky decomposition of $C_{**}(\lambda_g)$, sum of logarithms of the eigenvalues of $C_{**}(\lambda_g)$, and log of prior probability of that $lambda_g$.
+

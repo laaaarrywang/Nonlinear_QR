@@ -1,0 +1,25 @@
+---
+title: "compilation"
+author: "Linxuan Wang"
+date: "2023-08-08"
+output: pdf_document
+---
+
+# Unload the old version .so file FIRST
+```{r}
+getLoadedDLLs()
+dyn.unload("myqrjoint.so") 
+dyn.unload("/Library/Frameworks/R.framework/Versions/4.2-arm64/Resources/library/qrjoint/libs/qrjoint.so")
+```
+
+# C code compilation (Run the line below in the Terminal FIRST)
+R CMD SHLIB myqrjoint.c
+
+# C code loading
+
+```{r}
+dyn.load("myqrjoint.so")
+dyn.load("/Library/Frameworks/R.framework/Versions/4.2-arm64/Resources/library/qrjoint/libs/qrjoint.so")
+```
+
+

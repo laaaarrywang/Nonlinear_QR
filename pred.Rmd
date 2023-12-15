@@ -1,0 +1,193 @@
+---
+title: "predict"
+author: "Linxuan Wang"
+date: "2023-10-10"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("coefL.R")
+source("qrjointL.R")
+source("estFnL.R")
+source("summaryL.R")
+```
+
+```{r, estFn}
+estFnL <- function (par, x, y, gridmats, L, mid, nknots, ngrid, a.kap, 
+    a.sig, tau.g, reg.ix, reduce = TRUE, x.ce = 0, x.sc = 1, 
+    base.bundle,sparse = TRUE) {
+    n <- length(y) # number of observations
+    p <- ncol(x) # number of explanatory variables
+    wKnot <- matrix(par[1:(nknots * (p + 1))], nrow = nknots) # initial value of w_j at m=6 supplementary knots.
+    w0PP <- qrjoint:::ppFn0(wKnot[, 1], gridmats, L, nknots, ngrid) # wKnot[,1] is the initial value for w_0 at different knots
+    w0 <- w0PP$w # \tilde{w_0}(\tau), L-dimensional
+    wPP <- apply(wKnot[, -1, drop = FALSE], 2, qrjoint:::ppFn, gridmats = gridmats, 
+        L = L, nknots = nknots, ngrid = ngrid, a.kap = a.kap) # \tilde{w_j}(\tau), L-dimensional
+    wMat <- matrix(sapply(wPP, qrjoint:::extract, vn = "w"), ncol = p) # 121*13
+    if (sparse){
+      delta <- par[(nknots + 1)*(p+1) + 2 + 1:p]
+      indi <- sweep(abs(wMat), 2, delta, FUN=">")
+      wMat <- wMat*indi
+    }
+    zeta0.dot <- exp(qrjoint:::shrinkFn(p) * (w0 - max(w0))) # proportional to derivative of zeta. One question: why delete max(w0)?
+    zeta0 <- qrjoint:::trape(zeta0.dot[-c(1, L)], tau.g[-c(1, L)], L - 
+        2) # throw away the first and last grid (0 and 1), 
+    zeta0.tot <- zeta0[L - 2]
+    zeta0 <- c(0, tau.g[2] + (tau.g[L - 1] - tau.g[2]) * zeta0/zeta0.tot, 
+        1) # zeta0.tot is the total area between tau.g[2] and tau.g[L-1]
+    zeta0.dot <- (tau.g[L - 1] - tau.g[2]) * zeta0.dot/zeta0.tot
+    zeta0.dot[c(1, L)] <- 0
+    zeta0.ticks <- pmin(L - 1, pmax(1, sapply(zeta0, function(u) sum(tau.g <= 
+        u)))) # for interpolation
+    zeta0.dists <- (zeta0 - tau.g[zeta0.ticks])/(tau.g[zeta0.ticks + 
+        1] - tau.g[zeta0.ticks]) # 分子是zeta0中的点与紧邻的上一个tau.g中点的距离，分母是所在线段的长度
+    vMat <- apply(wMat, 2, qrjoint:::transform.grid, ticks = zeta0.ticks, 
+        dists = zeta0.dists) # 计算w(zeta(tau))
+    reach <- nknots * (p + 1)
+    gam0 <- par[reach + 1]
+    reach <- reach + 1
+    gam <- par[reach + 1:p]
+    reach <- reach + p
+    sigma <- qrjoint:::sigFn(par[reach + 1], a.sig)
+    reach <- reach + 1
+    nu <- qrjoint:::nuFn(par[reach + 1])
+    b0dot <- sigma * base.bundle$q0(zeta0, nu) * zeta0.dot
+    beta0.hat <- rep(NA, L)
+    beta0.hat[mid:L] <- gam0 + qrjoint:::trape(b0dot[mid:L], tau.g[mid:L], 
+        L - mid + 1)
+    beta0.hat[mid:1] <- gam0 + qrjoint:::trape(b0dot[mid:1], tau.g[mid:1], 
+        mid)
+    vNorm <- sqrt(rowSums(vMat^2))
+    a <- tcrossprod(vMat, x)
+    aX <- apply(-a, 1, max)/vNorm
+    aX[is.nan(aX)] <- Inf
+    aTilde <- vMat/(aX * sqrt(1 + vNorm^2))
+    ab0 <- b0dot * aTilde
+    beta.hat <- kronecker(rep(1, L), t(gam))
+    beta.hat[mid:L, ] <- beta.hat[mid:L, ] + apply(ab0[mid:L, 
+        , drop = FALSE], 2, qrjoint:::trape, h = tau.g[mid:L], len = L - 
+        mid + 1) # why mid?
+    beta.hat[mid:1, ] <- beta.hat[mid:1, ] + apply(ab0[mid:1, 
+        , drop = FALSE], 2, qrjoint:::trape, h = tau.g[mid:1], len = mid) # why mid?
+    beta.hat <- beta.hat/x.sc
+    beta0.hat <- beta0.hat - rowSums(beta.hat * x.ce)
+    betas <- cbind(beta0.hat, beta.hat)
+    if (reduce) {
+        betas <- betas[reg.ix, , drop = FALSE]
+        }
+    return(betas)
+}
+```
+
+```{r}
+# in case you want to run the following function line by line
+burn.perc = 0.5
+nmc = 200
+plot = TRUE
+show.intercept = TRUE
+reduce = TRUE
+sparse = TRUE
+object = oo
+```
+
+```{r, coef}
+coef <- function (object, burn.perc = 0.5, nmc = 200, plot = TRUE, show.intercept = TRUE, 
+    reduce = TRUE, sparse = TRUE, ...) 
+{
+    nsamp <- object$dim[10]
+    pars <- matrix(object$parsamp, ncol = nsamp)
+    ss <- unique(round(nsamp * seq(burn.perc, 1, len = nmc + 
+        1)[-1]))
+    n <- object$dim[1]
+    p <- object$dim[2]
+    L <- object$dim[3]
+    mid <- object$dim[4] + 1
+    nknots <- object$dim[5]
+    ngrid <- object$dim[6]
+    a.sig <- object$hyper[1:2]
+    a.kap <- matrix(object$hyper[-c(1:2)], nrow = 3)
+    tau.g <- object$tau.g
+    reg.ix <- object$reg.ix
+    x.ce <- outer(rep(1, L), attr(object$x, "scaled:center"))
+    x.sc <- outer(rep(1, L), attr(object$x, "scaled:scale"))
+    base.bundle <- list()
+    if (object$fbase.choice == 1) {
+        base.bundle$q0 <- function(u, nu = Inf) return(1/(dt(qt(qrjoint:::unitFn(u), 
+            df = nu), df = nu) * qt(0.9, df = nu)))
+        base.bundle$Q0 <- function(u, nu = Inf) return(qt(qrjoint:::unitFn(u), 
+            df = nu)/qt(0.9, df = nu))
+        base.bundle$F0 <- function(x, nu = Inf) return(pt(x * 
+            qt(0.9, df = nu), df = nu))
+    } else if (object$fbase.choice == 2) {
+        base.bundle$q0 <- function(u, nu = Inf) return(1/dlogis(qlogis(qrjoint:::unitFn(u))))
+        base.bundle$Q0 <- function(u, nu = Inf) return(qlogis(qrjoint:::unitFn(u)))
+        base.bundle$F0 <- function(x, nu = Inf) return(plogis(x))
+    } else {
+        base.bundle$q0 <- function(u, nu = Inf) return(1/(dunif(qunif(u, 
+            -1, 1), -1, 1)))
+        base.bundle$Q0 <- function(u, nu = Inf) return(qunif(u, 
+            -1, 1))
+        base.bundle$F0 <- function(x, nu = Inf) return(punif(x, 
+            -1, 1))
+    }
+    beta.samp <- sapply(ss, function(p1) estFn(pars[, p1], object$x, 
+        object$y, object$gridmats, L, mid, nknots, ngrid, a.kap, 
+        a.sig, tau.g, reg.ix, reduce, x.ce, x.sc, base.bundle,sparse), 
+        simplify = "array")
+    if (reduce) 
+        tau.g <- tau.g[reg.ix]
+    L <- length(tau.g)
+    if (plot) {
+        nr <- ceiling(sqrt(p + show.intercept))
+        nc <- ceiling((p + show.intercept)/nr)
+        cur.par <- par(no.readonly = TRUE)
+        par(mfrow = c(nr, nc))
+    }
+    beta.hat <- array(0, c(L, p + 1, 3))
+    plot.titles <- c("Intercept", object$xnames)
+    beta.hat[, 1, ] <- qrjoint:::getBands(beta.samp[, 1, ], plot = (plot & 
+        show.intercept), add = FALSE, x = tau.g, xlab = "tau", 
+        ylab = "Coefficient", bty = "n")
+    if (plot & show.intercept) 
+        title(main = plot.titles[1])
+    for (j in 2:(p + 1)) {
+        beta.hat[, j, ] <- qrjoint:::getBands(beta.samp[, j, ], plot = plot, 
+            add = FALSE, x = tau.g, xlab = "tau", ylab = "Coefficient", 
+            bty = "n")
+        if (plot) {
+            title(main = plot.titles[j])
+            abline(h = 0, lty = 2, col = 4)
+        }
+    }
+    if (plot) 
+        suppressWarnings(par(cur.par, no.readonly = TRUE))
+    dimnames(beta.hat) <- list(tau = tau.g, beta = plot.titles, 
+        summary = c("b.lo", "b.med", "b.hi"))
+    dimnames(beta.samp) <- list(tau = tau.g, beta = plot.titles, 
+        iter = 1:length(ss))
+    invisible(list(beta.samp = beta.samp, beta.est = beta.hat))
+    mid.red <- which(tau.g == object$tau.g[mid])
+    parametric.list <- rbind(beta.samp[mid.red, , , drop = TRUE], 
+        sigma = qrjoint:::sigFn(pars[nknots * (p + 1) + (p + 1) + 1, ss], 
+            a.sig), nu = qrjoint:::nuFn(pars[(nknots + 1) * (p + 1) + 2, 
+            ss]))
+    dimnames(parametric.list)[[1]][1 + 0:p] <- c("Intercept", 
+        object$xnames)
+    gamsignu <- t(apply(parametric.list, 1, quantile, pr = c(0.5, 
+        0.025, 0.975)))
+    dimnames(gamsignu)[[2]] <- c("Estimate", "Lo95%", "Up95%")
+    invisible(list(beta.samp = beta.samp, beta.est = beta.hat, 
+        parametric = gamsignu))
+}
+```
+
+```{r, estimated coefficients}
+coefs1 <- coefL(models.ori.1000[[29]],sparse = FALSE)
+
+coefs2 <- coefL(models.1000[[29]],sparse = TRUE)
+```
+
+
+
+

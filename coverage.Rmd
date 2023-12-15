@@ -1,0 +1,366 @@
+---
+title: "coverage"
+author: "Linxuan Wang"
+date: "2023-10-30"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(foreach)
+library(doParallel)
+library(gridExtra)
+```
+
+```{r, helper functions}
+custom_combine <- function(..., recursive = TRUE) {
+    args <- list(...)
+    if (length(args) == 0) return(list())
+    if (length(args) == 1) return(args[[1]])
+    do.call(c, c(args, recursive = list(recursive)))
+}
+
+is_contained <- function(i, j, ci, truth) {
+  ci[1, i, j] <= truth[i, j] && truth[i, j] <= ci[2, i, j]
+}
+```
+
+##### Let's look at coverage and error of true coefficients for only one dataset #####
+
+# deviance
+```{r}
+beta.samp1 = coefs1$beta.samp[2:100,,]
+beta.samp2 = coefs2$beta.samp[2:100,,]
+beta.true
+
+deviances1 <- apply(beta.samp1, 3, function(mat) {
+  abs(mat - beta.true)
+})
+avg_dev1 <- rowMeans(deviances1) # second element is the second element in intercept
+
+deviances2 <- apply(beta.samp2, 3, function(mat) {
+  abs(mat - beta.true)
+})
+avg_dev2 <- rowMeans(deviances2) # second element is the second element in intercept
+
+# overall proportion of sparse learning is better
+mean(avg_dev2 < avg_dev1)
+
+# what if look at deviance by each predictor?
+dev_mat <- matrix(avg_dev2 < avg_dev1,99,9)
+dev_by_pred <- colMeans(dev_mat)
+dev_by_pred
+
+# sadly the sparse learning doesn't give a lower mean absolute deviance at the 6-th coordinate, which is designed to be a constant. But what about variance?
+
+beta6.1 <- coefs1$beta.samp[2:100,6,]
+beta6.2 <- coefs2$beta.samp[2:100,6,]
+
+variance1 <- apply(beta6.1,2,var)
+variance2 <- apply(beta6.2,2,var)
+
+mean(variance2 < variance1)
+
+# well, slightly better. 10 out of 51 are estimated exactly as zero
+
+```
+
+# coverage
+```{r}
+# Define the quantiles we want
+quantiles <- c(0.025, 0.975)
+
+# Calculate the quantiles using apply()
+credible.intervals1 <- apply(beta.samp1, c(1, 2), function(col) quantile(col, probs = quantiles))
+credible.intervals2 <- apply(beta.samp2, c(1, 2), function(col) quantile(col, probs = quantiles))
+
+# The result has a dimension of 2x4x5 (2 quantiles x 4 columns x 5 slices)
+# Function to check if the true parameter is within the interval
+is_contained <- function(i, j, ci, truth) {
+  ci[1, i, j] <= truth[i, j] && truth[i, j] <= ci[2, i, j]
+}
+
+# Use outer() to apply is_contained function across all combinations
+coverage1 <- outer(1:nrow(beta.true), 1:ncol(beta.true), Vectorize(function(i, j){is_contained(i,j,credible.intervals1,beta.true)}))
+
+colMeans(coverage1)
+
+coverage2 <- outer(1:nrow(beta.true), 1:ncol(beta.true), Vectorize(function(i, j){is_contained(i,j,credible.intervals2,beta.true)}))
+
+colMeans(coverage2)
+```
+
+##### Next we try more datasets #####
+#### Firstly, sparse model
+
+```{r, DGP parallel version}
+n_dataset = 100
+n=1000
+
+cl <- makeCluster(detectCores())  # Use all available cores
+registerDoParallel(cl)
+clusterExport(cl, "q_y")
+
+results <- foreach(i = 1:n_dataset, .combine = abind::abind, .multicombine = TRUE, .init = array(0, dim = c(n,p + 1,1))) %dopar% {
+  set.seed(1026 + i)
+  # Some example computation for each slice
+  Z <- matrix(rnorm(n*p,0,1),n,p)
+  Z.norm <- apply(Z, 1, function(row) norm(row, type="2"))
+  U1 <- rbeta(n,8,1)
+  X <- U1*Z/Z.norm
+  U2 <- runif(n,0,1)
+
+  Y <- mapply(FUN = function(row_idx, u2_element) {
+    q_y(X[row_idx, , drop = FALSE], u2_element)
+  }, row_idx = 1:nrow(X), u2_element = U2, SIMPLIFY = FALSE)
+  Y <- do.call(rbind, Y)
+  
+  slice_data <- cbind(X,Y)
+  
+  return(slice_data)
+}
+
+# The results object is your 3D array
+data <- results[,,-1]
+
+stopCluster(cl)
+```
+
+```{r, parallel sparse model fitting}
+cl <- makeCluster(detectCores()-1)  # Use 9 cores
+registerDoParallel(cl)
+
+so_path = "myqrjoint.so"
+clusterExport(cl, 'so_path')
+clusterEvalQ(cl, dyn.load(so_path))
+
+models.1000 <- foreach(i = 1:n_dataset, .combine = custom_combine, .packages = 'base') %dopar% {
+  set.seed(1026 + i)
+  sim_data <- data.frame(data[,,i])
+  list(qrjointL(X9 ~ ., sim_data, nsamp = 200, thin = 100))
+}
+
+stopCluster(cl)
+```
+
+```{r, coverage for sparse learning models}
+cl <- makeCluster(detectCores())  # Use all available cores
+registerDoParallel(cl)
+
+coverages.1000 <- foreach(i = 1:n_dataset, .combine = abind::abind, .multicombine = TRUE, .init = array(0, dim = c(99,p + 1,1))) %dopar% {
+  
+  set.seed(1026 + i)
+  coefs <- coefL(models.1000[[i]],sparse = TRUE)
+  beta.samp = coefs$beta.samp[2:100,,]
+  
+  # Define the quantiles we want
+  quantiles <- c(0.025, 0.975)
+
+  # Calculate the quantiles using apply()
+  credible.intervals <- apply(beta.samp, c(1, 2), function(col) quantile(col, probs = quantiles))
+  coverage <- outer(1:nrow(beta.true),
+                    1:ncol(beta.true),
+                    Vectorize(function(i,j){is_contained(i,j,credible.intervals,beta.true)}))
+  
+  return(coverage)
+}
+coverages.1000 <- coverages.1000[,,-1]
+stopCluster(cl)
+
+```
+
+```{r, mean coverage, warning=FALSE, message=FALSE}
+coverages.mean = apply(coverages.1000,c(1,2),mean)
+plots_list <- list()
+selected_points <- seq(1, 99, length.out = 15)
+subset_mat = coverages.mean[selected_points,]
+taug <- seq(0.01,0.99,0.01)
+
+for (i in 1:ncol(subset_mat)) {
+  df <- data.frame(x = selected_points, y = subset_mat[, i])
+  
+  gg <- ggplot(df, aes(x = x, y = y)) +
+    geom_line(color = "blue") +  
+    geom_point(shape = 22, fill = "white", size = 3) +  
+    ggtitle(paste("Beta", i)) +
+    xlab("Tau") +
+    ylab("Coverage") +
+    ylim(0.5, 1) +
+    theme_minimal()
+    
+  plots_list[[i]] <- gg
+}
+
+grid.arrange(grobs=plots_list, ncol=3)
+```
+```{r, deviance for sparse learning models}
+cl <- makeCluster(detectCores())  # Use all available cores
+registerDoParallel(cl)
+
+deviances.1000 <- foreach(i = 1:n_dataset, .combine = abind::abind, .multicombine = TRUE, .init = array(0, dim = c(99,p + 1,1))) %dopar% {
+  
+  set.seed(1026 + i)
+  coefs <- coefL(models.1000[[i]],sparse = TRUE)
+  beta.samp = coefs$beta.samp[2:100,,]
+  
+  deviance <- apply(beta.samp,3,function(mat){
+    abs(mat - beta.true)
+  })
+  dev.avg <- rowMeans(deviance)
+  
+  return(matrix(dev.avg,99, p + 1))
+}
+deviances.1000 <- deviances.1000[,,-1]
+stopCluster(cl)
+
+```
+
+```{r, mean deviance, warning=FALSE, message=FALSE}
+deviances.mean = apply(deviances.1000,c(1,2),mean)
+plots_list <- list()
+selected_points <- seq(1, 99, length.out = 15)
+subset_mat = deviances.mean[selected_points,]
+taug <- seq(0.01,0.99,0.01)
+
+for (i in 1:ncol(subset_mat)) {
+  df <- data.frame(x = selected_points, y = subset_mat[, i])
+  
+  gg <- ggplot(df, aes(x = x, y = y)) +
+    geom_line(color = "blue") +  
+    geom_point(shape = 22, fill = "white", size = 3) +  
+    ggtitle(paste("Beta", i)) +
+    xlab("Tau") +
+    ylab("Error") +
+    ylim(0, 1) +
+    theme_minimal()
+    
+  plots_list[[i]] <- gg
+}
+
+grid.arrange(grobs=plots_list, ncol=3)
+```
+
+#### Next, original model
+
+```{r, parallel original model fitting}
+cl <- makeCluster(detectCores())  # Use all available cores
+registerDoParallel(cl)
+
+models.ori.1000 <- foreach(i = 1:n_dataset, .combine = custom_combine, .packages = c('base','qrjoint')) %dopar% {
+  set.seed(1026 + i)
+  sim_data <- data.frame(data[,,i])
+  list(qrjoint(X9 ~ ., sim_data, nsamp = 200, thin = 200))
+}
+
+stopCluster(cl)
+```
+
+```{r, coverage for original learning models}
+cl <- makeCluster(detectCores())  # Use all available cores
+registerDoParallel(cl)
+
+coverages.ori.1000 <- foreach(i = 1:n_dataset, .combine = abind::abind, .multicombine = TRUE, .init = array(0, dim = c(99,p + 1,1))) %dopar% {
+  
+  set.seed(1026 + i)
+  #coefs <- coefL(models.ori[[i]],sparse = FALSE)
+  coefs <- qrjoint:::coef.qrjoint(models.ori.1000[[i]])
+  
+  beta.samp = coefs$beta.samp[2:100,,]
+  
+  # Define the quantiles we want
+  quantiles <- c(0.025, 0.975)
+
+  # Calculate the quantiles using apply()
+  credible.intervals <- apply(beta.samp, c(1, 2), function(col) quantile(col, probs = quantiles))
+  coverage <- outer(1:nrow(beta.true),
+                    1:ncol(beta.true),
+                    Vectorize(function(i,j){is_contained(i,j,credible.intervals,beta.true)}))
+  
+  return(coverage)
+}
+coverages.ori.1000 <- coverages.ori.1000[,,-1]
+stopCluster(cl)
+
+```
+
+```{r, mean coverage visualization, warning=FALSE, message=FALSE}
+coverages.ori.mean = apply(coverages.ori.1000,c(1,2),mean)
+plots_list <- list()
+selected_points <- seq(1, 99, length.out = 15)
+subset_mat.nonsparse = coverages.ori.mean[selected_points,]
+subset_mat.sparse = coverages.mean[selected_points,]
+taug <- seq(0.01,0.99,0.01)
+
+for (i in 1:ncol(subset_mat)) {
+  
+  df <- data.frame(x = selected_points, y = subset_mat.nonsparse[, i], z = subset_mat.sparse[ ,i])
+  
+  gg <- ggplot(df, aes(x = x)) +
+    geom_line(aes(y = y, colour = "Original")) +  # Assign a color aesthetic for y
+    geom_point(aes(y = y, colour = "Original"), shape = 22, fill = "white", size = 3) +
+    geom_line(aes(y = z, colour = "Sparse Learning")) +  # Assign a different color aesthetic for z
+    geom_point(aes(y = z, colour = "Sparse Learning"), shape = 23, fill = "white", size = 3) +
+    ggtitle(paste("Beta", i)) +
+    xlab("Tau") +
+    ylab("Coverage") +
+    ylim(0.3, 1) +
+    scale_colour_manual(values = c("Original" = "blue", "Sparse Learning" = "red")) +  # Define custom colors for the legend
+    theme_minimal() +
+    guides(colour = guide_legend(title = "Method"))  # Add legend title
+    
+  plots_list[[i]] <- gg
+}
+
+grid.arrange(grobs=plots_list, ncol=3)
+```
+```{r, deviance for nonsparse learning models}
+cl <- makeCluster(detectCores())  # Use all available cores
+registerDoParallel(cl)
+
+deviances.ori.1000 <- foreach(i = 1:n_dataset, .combine = abind::abind, .multicombine = TRUE, .init = array(0, dim = c(99,p + 1,1))) %dopar% {
+  
+  set.seed(1026 + i)
+  coefs <- coefL(models.ori.1000[[i]],sparse = FALSE)
+  beta.samp = coefs$beta.samp[2:100,,]
+  
+  deviance <- apply(beta.samp,3,function(mat){
+    abs(mat - beta.true)
+  })
+  dev.avg <- rowMeans(deviance)
+  
+  return(matrix(dev.avg,99, p + 1))
+}
+deviances.ori.1000 <- deviances.ori.1000[,,-1]
+stopCluster(cl)
+
+```
+
+```{r, mean deviance visualization, for both sparse and nonsparse learning, warning=FALSE, message=FALSE}
+deviances.ori.mean = apply(deviances.ori.1000,c(1,2),mean)
+plots_list <- list()
+selected_points <- seq(1, 99, length.out = 20)
+subset_mat.nonsparse <- deviances.ori.mean[selected_points,]
+subset_mat.sparse <- deviances.mean[selected_points,]
+taug <- seq(0.01,0.99,0.01)
+
+for (i in 1:ncol(subset_mat)) {
+  df <- data.frame(x = selected_points, y = subset_mat.nonsparse[, i], z = subset_mat.sparse[ ,i])
+  
+  gg <- ggplot(df, aes(x = x)) +
+    geom_line(aes(y = y, colour = "Original")) +  # Assign a color aesthetic for y
+    geom_point(aes(y = y, colour = "Original"), shape = 22, fill = "white", size = 3) +
+    geom_line(aes(y = z, colour = "Sparse Learning")) +  # Assign a different color aesthetic for z
+    geom_point(aes(y = z, colour = "Sparse Learning"), shape = 23, fill = "white", size = 3) +
+    ggtitle(paste("Beta", i)) +
+    xlab("Tau") +
+    ylab("Error") +
+    ylim(0, 2) +
+    scale_colour_manual(values = c("Original" = "blue", "Sparse Learning" = "red")) +  # Define custom colors for the legend
+    theme_minimal() +
+    guides(colour = guide_legend(title = "Method"))  # Add legend title
+    
+  plots_list[[i]] <- gg
+}
+
+grid.arrange(grobs=plots_list, ncol=3)
+```
